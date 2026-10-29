@@ -1,0 +1,59 @@
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+
+# Version control
+.git/
+.gitignore
+.gitattributes
+
+# Python caches and compiled files
+**/__pycache__/
+**/*.py[cod]
+**/*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+**/.venv/
+**/venv/
+
+# Build and packaging output
+build/
+dist/
+*.egg-info/
+pip-wheel-metadata/
+
+# IDE and operating-system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Logs and temporary files
+*.log
+tmp/
+temp/
+
+# Local runtime data and sensitive test material
+data/
+reports/
+incoming/
+secrets/
+*.pem
+*.key
+
+# Docker and test artifacts
+docker-compose.override.yaml
+docker-compose.override.yml

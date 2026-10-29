@@ -1,0 +1,28 @@
+# Qdrant holds the "invoice_chunks" collection. Every point in it was built from
+# text already persisted in audit.invoice_audit, so this store is derived and
+# disposable: losing the volume is a rebuild (POST /admin/reindex), not data
+# loss. The collection itself is created by the agent at startup, which is where
+# the vector dimension is checked against the live embedding model.
+
+log_level: INFO
+
+service:
+  host: 0.0.0.0
+  http_port: 6333
+  grpc_port: 6334
+  # The dashboard is served over the same HTTP port; the host mapping is bound
+  # to 127.0.0.1 in compose.yaml, so it is not reachable off-host.
+  enable_cors: true
+
+storage:
+  storage_path: /qdrant/storage
+  snapshots_path: /qdrant/snapshots
+  # Vectors stay in RAM: the corpus is a few thousand chunks and recall latency
+  # matters more than footprint at this size.
+  on_disk_payload: true
+
+  performance:
+    max_search_threads: 0   # 0 = use all available cores
+
+  optimizers:
+    default_segment_number: 2

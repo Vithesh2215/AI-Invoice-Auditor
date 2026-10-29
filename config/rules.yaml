@@ -1,0 +1,141 @@
+# AI Invoice Auditor – Validation Rules Configuration
+# This file defines the business and data validation rules
+# applied by the Invoice Data Validation Agent and Business Validation Agent.
+
+# 1. General Invoice Requirements
+required_fields:
+  header:
+    - invoice_no
+    - invoice_date
+    - vendor_id
+    - currency
+    - total_amount
+  line_item:
+    - item_code
+    - description
+    - qty
+    - unit_price
+    - total
+
+# 2. Field Data Type Rules
+data_types:
+  invoice_no: str
+  invoice_date: date
+  vendor_id: str
+  currency: str
+  total_amount: float
+  qty: float
+  unit_price: float
+  total: float
+
+# 3. Business Validation Thresholds
+tolerances:
+  # Maximum allowed deviation when comparing invoice vs ERP
+  price_difference_percent: 5       # ±5% tolerance in unit price
+  quantity_difference_percent: 0    # Quantity must match exactly
+  tax_difference_percent: 2         # ±2% tolerance for tax amounts
+
+# 4. Currency Validation Rules
+accepted_currencies:
+  - USD
+  - EUR
+  - INR
+  - GBP
+
+# Define fallback mapping for currency symbols → ISO codes
+currency_symbol_map:
+  "$": "USD"
+  "€": "EUR"
+  "₹": "INR"
+  "£": "GBP"
+
+# 5. Validation Policies
+validation_policies:
+  # Missing mandatory field handling
+  missing_field_action: "flag"
+  # If totals mismatch beyond tolerance
+  total_mismatch_action: "manual_review"
+  # For currency not in accepted list
+  invalid_currency_action: "reject"
+  # Auto-approval threshold (if no discrepancy & translation confidence ≥ 0.95)
+  auto_approve_confidence_threshold: 0.95
+
+# 6. Reporting Parameters
+reporting:
+  include_translation_confidence: true
+  include_discrepancy_summary: true
+  report_format: "HTML"
+  output_dir: "./outputs/reports"
+
+# 7. Logging and Audit Settings
+logging:
+  enable_audit_log: true
+  # Container logs go to stdout/stderr. This path is only honoured when the
+  # agent is run outside a container.
+  log_file: "./logs/invoice_auditor.log"
+  log_level: "INFO"
+
+# 8. Arithmetic Tolerances
+# Absolute currency-unit slack allowed when re-adding a document that was
+# rounded to two decimal places before it was printed.
+arithmetic:
+  line_total_abs_tolerance: 0.02
+  subtotal_abs_tolerance: 0.05
+  total_abs_tolerance: 0.05
+  default_tax_rate_percent: 10
+
+# 9. Discrepancy Severity Mapping
+# Deviation of a numeric field, expressed as a percentage, mapped to the
+# severity recorded in audit.discrepancies. Evaluated top down; the first
+# band whose max_deviation_percent is not exceeded wins.
+severity_bands:
+  - severity: low
+    max_deviation_percent: 2
+  - severity: medium
+    max_deviation_percent: 10
+  - severity: high
+    max_deviation_percent: 25
+  - severity: critical
+    max_deviation_percent: null      # anything above the previous band
+
+# Findings that are always treated as serious regardless of deviation size.
+severity_overrides:
+  missing_invoice_number: high
+  missing_po_number: high
+  po_not_found: critical
+  vendor_not_found: high
+  vendor_mismatch: high
+  currency_mismatch: critical
+  unknown_item_code: high
+  unaccepted_currency: critical
+  line_not_on_po: high
+  extraction_failed: critical
+
+# 10. Recommendation Engine
+# Evaluated in order; the first matching rule decides the recommendation.
+recommendation:
+  reject_if:
+    any_severity: [critical]
+  review_if:
+    any_severity: [high, medium]
+    min_discrepancy_count: 1
+    below_translation_confidence: 0.85
+  approve_if:
+    max_severity: low
+
+# 11. RAG Pipeline
+rag:
+  chunk_size: 900
+  chunk_overlap: 120
+  top_k: 6
+  retrieval_expansion_k: 12        # widened top_k on a reflection retry
+  score_threshold: 0.15
+  max_context_chars: 9000
+  # Section 3.6: accept the answer when the RAG Triad average clears this
+  # bar, otherwise retrieve again, up to max_attempts in total.
+  min_triad_score: 0.7
+  max_attempts: 3
+  source_type_boost:
+    report: 0.05
+    invoice: 0.0
+

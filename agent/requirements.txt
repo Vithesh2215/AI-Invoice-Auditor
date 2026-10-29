@@ -1,0 +1,52 @@
+# -----------------------------------------------------------------------------
+# Agent service dependencies.
+#
+# Pinned exactly: an audit that cannot be reproduced is not an audit, and a
+# floating LangGraph or LiteLLM version changes behaviour between builds.
+# -----------------------------------------------------------------------------
+
+# --- web layer
+fastapi==0.115.12
+uvicorn[standard]==0.34.2
+python-multipart==0.0.20
+
+# --- configuration and models
+pydantic==2.11.4
+pydantic-settings==2.9.1
+PyYAML==6.0.2
+
+# --- database
+psycopg[binary]==3.2.9
+psycopg-pool==3.2.6
+
+# --- agent orchestration
+langgraph==0.4.5
+langgraph-checkpoint-postgres==2.0.21
+langchain-text-splitters==0.3.8
+
+# --- model gateway
+litellm==1.69.3
+boto3==1.38.20
+
+# --- retrieval
+qdrant-client==1.14.2
+
+# --- cache
+redis==5.2.1
+
+# --- document extraction
+pdfplumber==0.11.6
+pdf2image==1.17.0
+pytesseract==0.3.13
+Pillow==10.3.0
+python-docx==1.1.2
+
+# --- parsing helpers
+dateparser==1.2.1
+langdetect==1.0.9
+
+# --- reporting and http
+Jinja2==3.1.6
+httpx==0.28.1
+fastembed==0.3.4
+

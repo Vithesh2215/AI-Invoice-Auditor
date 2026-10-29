@@ -1,0 +1,280 @@
+# AI Invoice Auditor - full stack.
+# Every host mapping is bound to 127.0.0.1: these ports exist for a human with
+# a browser, not for the containers. Services address each other by Compose
+# service name on the invoice-network bridge (mock-erp:8000, postgres:5432,
+# qdrant:6333, redis:6379), because that name survives a restart and an IP from
+# `docker inspect` does not.
+# Configuration lives in a single ./.env, which Compose loads automatically.
+# The environment: blocks below hand each container only the variables that
+# service is entitled to, so one file to edit does not mean the superuser
+# password is exported into the dashboard. Each credential is declared once:
+# the init script that creates the role and the service that logs in with it
+# read the same variable, so they cannot drift apart.
+
+name: ai-invoice-auditor
+
+services:
+
+  # Section 1 of 6. System of record. The init scripts and the ERP seed JSON
+  # are baked into invoice-postgres, so the image is self-contained; they run
+  # once, on the first start with an empty volume, in filename order:
+  #   01 erp schema + JSON import    02 erp_reader role
+  #   03 audit + langgraph schemas   04 agent (rw) and ui (ro) roles
+  postgres:
+    image: postgres:16.15-bookworm
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-invoice_auditor}
+      POSTGRES_USER: ${POSTGRES_USER:-invoice_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      ERP_DB_USER: ${ERP_DB_USER:-erp_reader}
+      ERP_DB_PASSWORD: ${ERP_DB_PASSWORD:?set ERP_DB_PASSWORD in .env}
+      AGENT_DB_USER: ${AGENT_DB_USER:-invoice_agent}
+      AGENT_DB_PASSWORD: ${AGENT_DB_PASSWORD:?set AGENT_DB_PASSWORD in .env}
+      UI_DB_USER: ${UI_DB_USER:-invoice_ui}
+      UI_DB_PASSWORD: ${UI_DB_PASSWORD:?set UI_DB_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/erp_schema.sql:/docker-entrypoint-initdb.d/01_erp_schema.sql:ro
+      - ./database/seed:/erp-data:ro
+      - ./database/02_reader.sh:/docker-entrypoint-initdb.d/02_reader.sh:ro
+      - ./database/03_audit_schema.sql:/docker-entrypoint-initdb.d/03_audit_schema.sql:ro
+      - ./database/04_app_roles.sh:/docker-entrypoint-initdb.d/04_app_roles.sh:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'pg_isready -h 127.0.0.1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"'
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+    networks:
+      - invoice-network
+
+  # Section 2 of 6. Read-only facade over the erp schema. The agent's database
+  # role has no privileges there at all, so this HTTP API is the only route to
+  # ERP data.
+  mock-erp:
+    image: invoice-erp:1.0.0
+    build:
+      context: .
+      dockerfile: mock-erp/Dockerfile
+    environment:
+      ERP_DB_HOST: ${DB_HOST:-postgres}
+      ERP_DB_PORT: ${DB_PORT:-5432}
+      ERP_DB_NAME: ${POSTGRES_DB:-invoice_auditor}
+      ERP_DB_USER: ${ERP_DB_USER:-erp_reader}
+      ERP_DB_PASSWORD: ${ERP_DB_PASSWORD:?set ERP_DB_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:8001:8000"
+    
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+    networks:
+      - invoice-network
+
+  # Section 3 of 6. Derived store for the RAG index. Losing this volume is a
+  # rebuild, not data loss: POST /admin/reindex repopulates it from PostgreSQL.
+  qdrant:
+    image: qdrant/qdrant:v1.14.0
+    ports:
+      - "127.0.0.1:6333:6333"
+      - "127.0.0.1:6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+      - ./qdrant/config.yaml:/qdrant/config/production.yaml:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'bash -c ":> /dev/tcp/127.0.0.1/6333" || exit 1'
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+    networks:
+      - invoice-network
+
+  # Section 4 of 6. Pure cache. Nothing in here is the only copy of anything,
+  # so redis.conf (baked into the image) switches persistence off and sets
+  # eviction to allkeys-lru.
+  redis:
+    image: redis:7.4.3-bookworm
+    ports:
+      - "127.0.0.1:6379:6379"
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    volumes:
+      - ./redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+    # Deliberately no volume. Everything here is recomputable and carries a
+    # TTL, so a restart losing the cache must only make the system slower.
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+    networks:
+      - invoice-network
+
+  # Section 5 of 6. LangGraph workflows, the folder watcher and the
+  # control-plane API. config/ is mounted read-only: changing a tolerance or a
+  # prompt needs a restart, not a rebuild. data/ is read-write because the
+  # reporter writes into data/reports and uploads land in data/incoming.
+  agent:
+    image: invoice-agent:1.0.0
+    build:
+      context: .
+      dockerfile: agent/Dockerfile
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
+      # audit database: role created by 04_app_roles.sh, no rights on erp
+      AGENT_DB_HOST: ${DB_HOST:-postgres}
+      AGENT_DB_PORT: ${DB_PORT:-5432}
+      AGENT_DB_NAME: ${POSTGRES_DB:-invoice_auditor}
+      AGENT_DB_USER: ${AGENT_DB_USER:-invoice_agent}
+      AGENT_DB_PASSWORD: ${AGENT_DB_PASSWORD:?set AGENT_DB_PASSWORD in .env}
+
+      # topology: service names and container ports, fixed by this file
+      ERP_BASE_URL: http://mock-erp:8000
+      ERP_TIMEOUT_SECONDS: ${ERP_TIMEOUT_SECONDS:-10}
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_COLLECTION: ${QDRANT_COLLECTION:-invoice_chunks}
+      REDIS_URL: redis://redis:6379/0
+
+      # bind mounts declared under volumes: below
+      INCOMING_DIR: /data/incoming
+      REPORTS_DIR: /data/reports
+      CONFIG_DIR: /config
+
+      # Credentials are deliberately left empty in .env. The ~/.aws mount below
+      # supplies them instead, so no key is copied into the project. Setting
+      # them in .env still works and takes precedence.
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+      AWS_SHARED_CREDENTIALS_FILE: /aws/credentials
+      AWS_CONFIG_FILE: /aws/config
+
+      LLM_ENABLED: ${LLM_ENABLED:-true}
+      LLM_REASONING_MODEL: ${LLM_REASONING_MODEL:-bedrock/converse/global.amazon.nova-2-lite-v1:0}
+      LLM_TRANSLATION_MODEL: ${LLM_TRANSLATION_MODEL:-bedrock/converse/global.amazon.nova-2-lite-v1:0}
+      LLM_RAG_MODEL: ${LLM_RAG_MODEL:-bedrock/converse/global.amazon.nova-2-lite-v1:0}
+      LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-90}
+      LLM_MAX_RETRIES: ${LLM_MAX_RETRIES:-3}
+
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-bedrock}
+      BEDROCK_EMBEDDING_MODEL: ${BEDROCK_EMBEDDING_MODEL:-amazon.titan-embed-text-v1}
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-1536}
+
+      WATCH_ENABLED: ${WATCH_ENABLED:-true}
+      WATCH_INTERVAL_SECONDS: ${WATCH_INTERVAL_SECONDS:-10}
+      WATCH_STABILITY_SECONDS: ${WATCH_STABILITY_SECONDS:-2}
+      WATCH_MAX_CONCURRENCY: ${WATCH_MAX_CONCURRENCY:-2}
+
+      OCR_LANGUAGES: ${OCR_LANGUAGES:-eng+spa+deu}
+      OCR_DPI: ${OCR_DPI:-300}
+      OCR_MIN_TEXT_CHARS: ${OCR_MIN_TEXT_CHARS:-40}
+    # The container writes reports into a bind mount, so it has to run as a uid
+    # that owns the host directory. Set AGENT_UID/AGENT_GID in .env
+    # (`id -u` / `id -g`) when the host user is not the image default.
+    user: "0:0"
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - ./config:/config:ro
+      - ./data/incoming:/data/incoming
+      - ./data/reports:/data/reports
+      # Read-only so the container can use the host's AWS credentials but never
+      # rewrite or refresh them. AGENT_UID must be able to read ~/.aws (mode
+      # 600 means it has to be the owning uid).
+      - ${AWS_CREDENTIALS_DIR:-~/.aws}:/aws:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mock-erp:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=8)"
+      interval: 30s
+      timeout: 10s
+      # Generous: the first start loads the embedding model and the LangGraph
+      # checkpointer creates its tables.
+      start_period: 180s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - invoice-network
+
+  # Section 6 of 6. Reads audit.* over a role that PostgreSQL itself holds to
+  # read-only; every write is an HTTP call to the agent.
+  streamlit-ui:
+    image: invoice-ui:1.0.0
+    build:
+      context: .
+      dockerfile: streamlit-ui/Dockerfile
+    environment:
+      AGENT_API_URL: http://agent:8000
+      # Where the auditor's browser reaches the agent, used only for links
+      # rendered in the page. Override if the stack is not browsed at
+      # localhost (a remote host, a reverse proxy, a different port).
+      AGENT_PUBLIC_URL: ${AGENT_PUBLIC_URL:-http://localhost:8000}
+      AGENT_API_TIMEOUT: ${AGENT_API_TIMEOUT:-180}
+      UI_DB_HOST: ${DB_HOST:-postgres}
+      UI_DB_PORT: ${DB_PORT:-5432}
+      UI_DB_NAME: ${POSTGRES_DB:-invoice_auditor}
+      UI_DB_USER: ${UI_DB_USER:-invoice_ui}
+      UI_DB_PASSWORD: ${UI_DB_PASSWORD:?set UI_DB_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:8501:8501"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      agent:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8501/_stcore/health', timeout=4)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - invoice-network
+
+volumes:
+  postgres_data:
+  qdrant_data:
+
+networks:
+  invoice-network:
+    driver: bridge

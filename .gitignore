@@ -1,0 +1,16 @@
+.env
+.env.*
+!.env.example
+
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+data/reports/*
+!data/reports/.gitkeep
+
+database/backups/*
+!database/backups/.gitkeep
+
+graphify-out/

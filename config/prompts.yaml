@@ -1,0 +1,105 @@
+# AI Invoice Auditor - user-message prompt templates
+# Personas (config/personas.yaml) supply the system message; this file supplies
+# the user message. Placeholders use Python str.format syntax and are filled in
+# by app/services/prompts.py. Keeping them out of the source means a prompt can
+# be tuned without rebuilding the agent image.
+
+version: 1
+
+templates:
+
+  translate: |
+    Translate the following invoice text into English.
+
+    Detected source language (may be wrong, correct it if so): {detected_language}
+    Document format: {source_format}
+    Extraction method: {extraction_method}
+
+    --- BEGIN INVOICE TEXT ---
+    {text}
+    --- END INVOICE TEXT ---
+
+  validate_data: |
+    Invoice under review: {file_name}
+
+    Structured fields extracted from the document:
+    {fields_json}
+
+    Line items ({line_count} rows):
+    {line_items_json}
+
+    Arithmetic and completeness checks already computed in code (authoritative):
+    {computed_checks_json}
+
+    Configured rules in force:
+    {rules_json}
+
+    Interpret these checks and assign severities.
+
+  validate_business: |
+    Invoice under review: {invoice_number} from vendor "{vendor_name}"
+    Purchase order referenced on the invoice: {po_number}
+
+    Invoice header:
+    {invoice_header_json}
+
+    Invoice line items:
+    {invoice_lines_json}
+
+    Purchase order retrieved from the ERP service (mock-erp HTTP API):
+    {po_json}
+
+    Vendor master record retrieved from the ERP service:
+    {vendor_json}
+
+    Confirmed discrepancies computed in code against the configured tolerances
+    (authoritative - do not add to this list, only grade it):
+    {discrepancies_json}
+
+    Tolerances in force: {tolerances_json}
+
+    Assess the business impact and assign severities.
+
+  write_report: |
+    Produce the auditor-facing summary for this invoice.
+
+    Invoice: {invoice_header_json}
+
+    Validation status: {validation_status}
+    Recommendation produced by the rules engine: {recommendation}
+    Reason the rules engine gave: {recommendation_reason}
+
+    Translation: source language {source_language}, confidence {translation_confidence}
+
+    Discrepancies ({discrepancy_count} total):
+    {discrepancies_json}
+
+    Purchase order on file:
+    {po_json}
+
+  rag_generate: |
+    Question: {question}
+
+    Context passages:
+    {context}
+
+    Answer the question using only the passages above, citing passage numbers.
+
+  rag_reflect: |
+    Question: {question}
+
+    Context passages that were retrieved:
+    {context}
+
+    Answer that was generated:
+    {answer}
+
+    Score this answer on the RAG Triad.
+
+  rag_rewrite: |
+    Original question: {question}
+
+    Previous attempt scored {previous_score} on the RAG Triad.
+    Evaluator noted this was missing: {missing_information}
+
+    Rewrite the retrieval query.

@@ -1,0 +1,5 @@
+Generated audit reports land here, one JSON and one HTML per completed invoice.
+
+They are an artefact, not the record. PostgreSQL is authoritative; deleting
+everything in this folder loses nothing that cannot be regenerated from
+audit.invoice_audit.
